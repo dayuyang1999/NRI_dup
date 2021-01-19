@@ -113,23 +113,13 @@ class MLPEncoder(nn.Module):
     def edge2node(self, x, rel_rec, rel_send):
         # NOTE: Assumes that we have the same graph across all samples.
         incoming = torch.matmul(rel_rec.t(), x)
-
-        #print("t_rel_rec shape = ", rel_rec.size)
-        #print("t_rel_send shape = ", rel_send.size)
-        #print("incoming shape = ", incoming.size)
-
-
         return incoming / incoming.size(1)
 
     def node2edge(self, x, rel_rec, rel_send):
         # NOTE: Assumes that we have the same graph across all samples.
-        #print("x shape", x.shape)
-        #print("rel_rec shape", rel_rec.shape)
         receivers = torch.matmul(rel_rec, x)
-        #print("receivers shape = ", receivers.size())
         senders = torch.matmul(rel_send, x)
         edges = torch.cat([senders, receivers], dim=2)
-        #print("edges shape = ", edges.size())
         return edges
 
     def forward(self, inputs, rel_rec, rel_send):
@@ -428,8 +418,6 @@ class MLPDecoder(nn.Module):
     def __init__(self, n_in_node, edge_types, msg_hid, msg_out, n_hid,
                  do_prob=0., skip_first=False):
         super(MLPDecoder, self).__init__()
-        print("n_in_node shape", n_in_node)
-
         self.msg_fc1 = nn.ModuleList(
             [nn.Linear(2 * n_in_node, msg_hid) for _ in range(edge_types)])
         self.msg_fc2 = nn.ModuleList(
@@ -564,18 +552,7 @@ class RNNDecoder(nn.Module):
 
     def single_step_forward(self, inputs, rel_rec, rel_send,
                             rel_type, hidden):
-        #print("rel_type shape", rel_type.shape)
-        # node2edge
-        receivers = torch.matmul(rel_rec, hidden)
-        senders = torch.matmul(rel_send, hidden)
-        pre_msg = torch.cat([senders, receivers], dim=-1)
 
-        all_msgs = Variable(torch.zeros(pre_msg.size(0), pre_msg.size(1),
-                                        self.msg_out_shape))
-        if inputs.is_cuda:
-            all_msgs = all_msgs.c    def single_step_forward(self, inputs, rel_rec, rel_send,
-                            rel_type, hidden):
-        #print("rel_type shape", rel_type.shape)
         # node2edge
         receivers = torch.matmul(rel_rec, hidden)
         senders = torch.matmul(rel_send, hidden)
@@ -585,93 +562,6 @@ class RNNDecoder(nn.Module):
                                         self.msg_out_shape))
         if inputs.is_cuda:
             all_msgs = all_msgs.cuda()
-
-        if self.skip_first_edge_type:
-            start_idx = 1
-            norm = float(len(self.msg_fc2)) - 1.
-        else:
-            start_idx = 0
-            norm = float(len(self.msg_fc2))
-
-        # Run separate MLP for every edge type
-        # NOTE: To exlude one edge type, simply offset range by 1
-        for i in range(start_idx, len(self.msg_fc2)):
-            msg = F.tanh(self.msg_fc1[i](pre_msg))
-            msg = F.dropout(msg, p=self.dropout_prob)
-            msg = F.tanh(self.msg_fc2[i](msg))
-            msg = msg * rel_type[:, :, i:i + 1]
-            all_msgs += msg / norm
-
-        agg_msgs = all_msgs.transpose(-2, -1).matmul(rel_rec).transpose(-2,
-                                                                        -1)
-        agg_msgs = agg_msgs.contiguous() / inputs.size(2)  # Average
-
-        # GRU-style gated aggregation
-        r = F.sigmoid(self.input_r(inputs) + self.hidden_r(agg_msgs))
-        i = F.sigmoid(self.input_i(inputs) + self.hidden_i(agg_msgs))
-        n = F.tanh(self.input_n(inputs) + r * self.hidden_h(agg_msgs))
-        hidden = (1 - i) * n + i * hidden
-
-        # Output MLP
-        pred = F.dropout(F.relu(self.out_fc1(hidden)), p=self.dropout_prob)
-        pred = F.dropout(F.relu(self.out_fc2(pred)), p=self.dropout_prob)
-        pred = self.out_fc3(pred)
-
-        # Predict position/velocity difference
-        pred = inputs + pred
-
-        return pred, hidden
-
-    def forward(self, data, rel_type, rel_rec, rel_send, pred_steps=1,
-                burn_in=False, burn_in_steps=1, dynamic_graph=False,
-                encoder=None, temp=None):
-
-        inputs = data.transpose(1, 2).contiguous()
-
-        time_steps = inputs.size(1)
-
-        # inputs has shape
-        # [batch_size, num_timesteps, num_atoms, num_dims]
-
-        # rel_type has shape:
-        # [batch_size, num_atoms*(num_atoms-1), num_edge_types]
-
-        hidden = Variable(
-            torch.zeros(inputs.size(0), inputs.size(2), self.msg_out_shape))
-        if inputs.is_cuda:
-            hidden = hidden.cuda()
-
-        pred_all = []
-
-        for step in range(0, inputs.size(1) - 1):
-
-            if burn_in:
-                if step <= burn_in_steps:
-                    ins = inputs[:, step, :, :]
-                else:
-                    ins = pred_all[step - 1]
-            else:
-                assert (pred_steps <= time_steps)
-                # Use ground truth trajectory input vs. last prediction
-                if not step % pred_steps:
-                    ins = inputs[:, step, :, :]
-                else:
-                    ins = pred_all[step - 1]
-
-            if dynamic_graph and step >= burn_in_steps:
-                # NOTE: Assumes burn_in_steps = args.timesteps
-                logits = encoder(
-                    data[:, :, step - burn_in_steps:step, :].contiguous(),
-                    rel_rec, rel_send)
-                rel_type = gumbel_softmax(logits, tau=temp, hard=True)
-
-            pred, hidden = self.single_step_forward(ins, rel_rec, rel_send,
-                                                    rel_type, hidden)
-            pred_all.append(pred)
-
-        preds = torch.stack(pred_all, dim=1)
-
-        return preds.transpose(1, 2).contiguous()uda()
 
         if self.skip_first_edge_type:
             start_idx = 1
